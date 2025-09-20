@@ -1,111 +1,158 @@
 import tensorflow as tf
-from tensorflow.keras import layers, models
+from tensorflow.keras import layers
 from pathlib import Path
-from tensorflow.keras.preprocessing.image import load_img, img_to_array
-import numpy as np
 import json
+import sys
 
-# ------------------------
+# -------------------------
 # Paths
-# ------------------------
-project_root = Path(__file__).parent
-train_path = project_root / "data/train"
-val_path = project_root / "data/val"
+# -------------------------
+project_root = Path(__file__).resolve().parent
+train_path = project_root / "data" / "train"
+val_path   = project_root / "data" / "val"
 models_dir = project_root / "models"
 models_dir.mkdir(exist_ok=True)
 
+if not train_path.exists() or not val_path.exists():
+    print("ERROR: data/train or data/val folder not found. Make sure you run this from project root.")
+    sys.exit(1)
+
+# -------------------------
+# Parameters
+# -------------------------
 IMAGE_SIZE = (64, 64)
+BATCH_SIZE = 32
+AUTOTUNE = tf.data.AUTOTUNE
 
+# -------------------------
+# Load datasets (will infer folder order)
+# -------------------------
+train_ds = tf.keras.utils.image_dataset_from_directory(
+    str(train_path),
+    image_size=IMAGE_SIZE,
+    color_mode="grayscale",
+    batch_size=BATCH_SIZE,
+    label_mode="int"
+)
 
+val_ds = tf.keras.utils.image_dataset_from_directory(
+    str(val_path),
+    image_size=IMAGE_SIZE,
+    color_mode="grayscale",
+    batch_size=BATCH_SIZE,
+    label_mode="int"
+)
+
+folder_names = train_ds.class_names
+print("Folder order discovered by TF:", folder_names)
+
+# -------------------------
+# folder_to_char: romanized -> actual Marathi character
+# (Covers all folder names you posted; includes 'ng')
+# -------------------------
 folder_to_char = {
-    "a_": "अ", "aa": "आ", "i": "इ", "ii": "ई",
-    "u": "उ", "uu": "ऊ", "e": "ए", "ai": "ऐ",
-    "o": "ओ", "au": "औ", "k": "क", "kh": "ख",
-    "g": "ग", "gh": "घ", "ch": "च", "chh": "छ",
-    "j": "ज", "jh": "झ", "ny": "ञ", "tt": "ट",
-    "tth": "ठ", "dd": "ड", "ddh": "ढ", "nn": "ण",
-    "t": "त", "th": "थ", "d": "द", "dh": "ध",
-    "n": "न", "p": "प", "ph": "फ", "b": "ब",
-    "bh": "भ", "m": "म", "y": "य", "r": "र",
-    "l": "ल", "v": "व", "sh": "श", "shh": "ष",
-    "s": "स", "h": "ह", "ll": "ळ", "ksh": "क्ष",
-    "jnya": "ज्ञ"
+    "a_":"अ","aa":"आ","i":"इ","ii":"ई","u":"उ","uu":"ऊ",
+    "e":"ए","ai":"ऐ","o":"ओ","au":"औ","k":"क","kh":"ख",
+    "g":"ग","gh":"घ","ng":"ङ","ch":"च","chh":"छ","j":"ज","jh":"झ",
+    "ny":"ञ","tt":"ट","tth":"ठ","dd":"ड","ddh":"ढ","nn":"ण",
+    "t":"त","th":"थ","d":"द","dh":"ध","n":"न","p":"प","ph":"फ",
+    "b":"ब","bh":"भ","m":"म","y":"य","r":"र","l":"ल","v":"व",
+    "sh":"श","shh":"ष","s":"स","h":"ह","ll":"ळ","ksh":"क्ष","jnya":"ज्ञ"
 }
 
+# Build index_to_char according to folder order; fallback if missing
+index_to_char = []
+missing = []
+for name in folder_names:
+    if name in folder_to_char:
+        index_to_char.append(folder_to_char[name])
+    else:
+        missing.append(name)
+        # Fallback: use the folder name itself as placeholder (so training continues)
+        index_to_char.append(name)
 
-# ------------------------
-# Load images manually
-# ------------------------
-def load_images_labels(path: Path):
-    images = []
-    labels = []
-    # Make sure class folders are Paths
-    class_dirs = sorted([f for f in path.iterdir() if f.is_dir()])
-    class_names = [f.name for f in class_dirs]
-    
-    for idx, folder in enumerate(class_dirs):
-        for img_file in folder.glob("*.png"):
-            img = load_img(img_file, color_mode="grayscale", target_size=IMAGE_SIZE)
-            arr = img_to_array(img)/255.0
-            images.append(arr)
-            labels.append(idx)
-        for img_file in folder.glob("*.jpg"):
-            img = load_img(img_file, color_mode="grayscale", target_size=IMAGE_SIZE)
-            arr = img_to_array(img)/255.0
-            images.append(arr)
-            labels.append(idx)
-    return np.array(images), np.array(labels), class_names
+if missing:
+    print("\nWARNING: The following folders were NOT found in folder_to_char mapping:")
+    for m in missing:
+        print("  -", m)
+    print("These folder names will be used as-is in index_to_char.json as placeholders.")
+    print("If you want actual Marathi characters for these, add them to folder_to_char in train.py.\n")
 
-X_train, y_train, class_names = load_images_labels(train_path)
-X_val, y_val, _ = load_images_labels(val_path)
+num_classes = len(index_to_char)
+print("Final index -> character mapping (length {}):".format(num_classes))
+print(index_to_char)
 
-num_classes = len(class_names)
-print("Classes:", class_names)
-print("Train images:", X_train.shape, "Val images:", X_val.shape)
+# Save mapping (so GUI can load index_to_char.json)
+with open(models_dir / "index_to_char.json","w",encoding="utf-8") as f:
+    json.dump(index_to_char, f, ensure_ascii=False, indent=2)
 
-# ------------------------
-# CNN Model
-# ------------------------
-model = models.Sequential([
-    layers.Input(shape=(64,64,1)),
-    layers.Conv2D(32,3,activation='relu',padding='same'),
+# -------------------------
+# Data augmentation + perf
+# -------------------------
+data_augmentation = tf.keras.Sequential([
+    layers.RandomRotation(0.1),
+    layers.RandomZoom(0.08),
+    layers.RandomTranslation(0.08, 0.08),
+])
+
+train_ds = train_ds.map(lambda x, y: (data_augmentation(x, training=True), y))
+train_ds = train_ds.cache().shuffle(1000).prefetch(buffer_size=AUTOTUNE)
+val_ds = val_ds.cache().prefetch(buffer_size=AUTOTUNE)
+
+# -------------------------
+# Improved CNN
+# -------------------------
+model = tf.keras.Sequential([
+    layers.Rescaling(1./255, input_shape=(IMAGE_SIZE[0], IMAGE_SIZE[1], 1)),
+
+    layers.Conv2D(32, 3, activation='relu', padding='same'),
+    layers.BatchNormalization(),
+    layers.Conv2D(32, 3, activation='relu', padding='same'),
     layers.MaxPooling2D(),
-    layers.Conv2D(64,3,activation='relu',padding='same'),
+    layers.Dropout(0.2),
+
+    layers.Conv2D(64, 3, activation='relu', padding='same'),
+    layers.BatchNormalization(),
+    layers.Conv2D(64, 3, activation='relu', padding='same'),
     layers.MaxPooling2D(),
-    layers.Conv2D(128,3,activation='relu',padding='same'),
+    layers.Dropout(0.3),
+
+    layers.Conv2D(128, 3, activation='relu', padding='same'),
+    layers.BatchNormalization(),
     layers.MaxPooling2D(),
+    layers.Dropout(0.4),
+
     layers.Flatten(),
-    layers.Dense(256,activation='relu'),
-    layers.Dense(num_classes,activation='softmax')
+    layers.Dense(256, activation='relu'),
+    layers.Dropout(0.5),
+    layers.Dense(num_classes, activation='softmax')
 ])
 
 model.compile(
-    optimizer='adam',
+    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
     loss='sparse_categorical_crossentropy',
     metrics=['accuracy']
 )
 
-# ------------------------
-# Train
-# ------------------------
-callback = tf.keras.callbacks.EarlyStopping(
-    monitor='val_accuracy', patience=5, restore_best_weights=True
-)
+model.summary()
 
-model.fit(
-    X_train, y_train,
-    validation_data=(X_val, y_val),
-    batch_size=32,
+# -------------------------
+# Callbacks & training
+# -------------------------
+callbacks = [
+    tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
+    tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, verbose=1)
+]
+
+history = model.fit(
+    train_ds,
+    validation_data=val_ds,
     epochs=50,
-    callbacks=[callback],
-    shuffle=True
+    callbacks=callbacks
 )
 
-# ------------------------
-# Save model + mapping
-# ------------------------
+# -------------------------
+# Save model
+# -------------------------
 model.save(models_dir / "marathi_ocr_model.h5")
-with open(models_dir / "index_to_char.json","w",encoding="utf-8") as f:
-    json.dump(class_names, f, ensure_ascii=False, indent=2)
-
-print("✅ Training complete. Model + mapping saved!")
+print("✅ Training complete. Saved model and mapping to:", models_dir)
