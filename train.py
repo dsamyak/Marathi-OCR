@@ -1,158 +1,217 @@
-import tensorflow as tf
-from tensorflow.keras import layers
-from pathlib import Path
+# train.py
+# -*- coding: utf-8 -*-
+"""
+Training script for Marathi OCR.
+- Loads data from data/train and data/val (romanized folder names).
+- Applies augmentation, builds a CNN, trains with early stopping.
+- Saves models/marathi_ocr_model.h5 and models/index_to_char.json
+"""
+
+import os
 import json
-import sys
+import argparse
+from pathlib import Path
+
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import (Conv2D, MaxPooling2D, Flatten,
+                                     Dense, Dropout, BatchNormalization)
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
+
+# Ensure reproducible-ish behavior
+tf.random.set_seed(42)
+np.random.seed(42)
 
 # -------------------------
-# Paths
+# Configuration
 # -------------------------
-project_root = Path(__file__).resolve().parent
-train_path = project_root / "data" / "train"
-val_path   = project_root / "data" / "val"
-models_dir = project_root / "models"
-models_dir.mkdir(exist_ok=True)
+DATA_DIR = Path("data")
+TRAIN_DIR = DATA_DIR / "train"
+VAL_DIR = DATA_DIR / "val"
+MODELS_DIR = Path("models")
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-if not train_path.exists() or not val_path.exists():
-    print("ERROR: data/train or data/val folder not found. Make sure you run this from project root.")
-    sys.exit(1)
-
-# -------------------------
-# Parameters
-# -------------------------
-IMAGE_SIZE = (64, 64)
+IMAGE_SIZE = (64, 64)     # As required
 BATCH_SIZE = 32
-AUTOTUNE = tf.data.AUTOTUNE
+EPOCHS = 20
 
-# -------------------------
-# Load datasets (will infer folder order)
-# -------------------------
-train_ds = tf.keras.utils.image_dataset_from_directory(
-    str(train_path),
-    image_size=IMAGE_SIZE,
-    color_mode="grayscale",
-    batch_size=BATCH_SIZE,
-    label_mode="int"
-)
-
-val_ds = tf.keras.utils.image_dataset_from_directory(
-    str(val_path),
-    image_size=IMAGE_SIZE,
-    color_mode="grayscale",
-    batch_size=BATCH_SIZE,
-    label_mode="int"
-)
-
-folder_names = train_ds.class_names
-print("Folder order discovered by TF:", folder_names)
-
-# -------------------------
-# folder_to_char: romanized -> actual Marathi character
-# (Covers all folder names you posted; includes 'ng')
-# -------------------------
+# Example romanized -> Marathi mapping.
+# Add more mappings to this dict as you label folders.
+# If a folder is missing here, the fallback uses the folder name itself.
 folder_to_char = {
-    "a_":"अ","aa":"आ","i":"इ","ii":"ई","u":"उ","uu":"ऊ",
-    "e":"ए","ai":"ऐ","o":"ओ","au":"औ","k":"क","kh":"ख",
-    "g":"ग","gh":"घ","ng":"ङ","ch":"च","chh":"छ","j":"ज","jh":"झ",
-    "ny":"ञ","tt":"ट","tth":"ठ","dd":"ड","ddh":"ढ","nn":"ण",
-    "t":"त","th":"थ","d":"द","dh":"ध","n":"न","p":"प","ph":"फ",
-    "b":"ब","bh":"भ","m":"म","y":"य","r":"र","l":"ल","v":"व",
-    "sh":"श","shh":"ष","s":"स","h":"ह","ll":"ळ","ksh":"क्ष","jnya":"ज्ञ"
+    # basic consonants (examples)
+    "ka": "क",
+    "kha": "ख",
+    "ga": "ग",
+    "gha": "घ",
+    "nga": "ङ",
+    "cha": "च",
+    "chha": "छ",
+    "ja": "ज",
+    "jha": "झ",
+    "nya": "ञ",
+    "ta": "ट",
+    "tha": "ठ",
+    "da": "ड",
+    "dha": "ढ",
+    "na": "ण",
+    "pa": "प",
+    "pha": "फ",
+    "ba": "ब",
+    "bha": "भ",
+    "ma": "म",
+    "ya": "य",
+    "ra": "र",
+    "la": "ल",
+    "va": "व",
+    "sha": "श",
+    "sra": "श्र",  # example conjunct
+    "sa": "स",
+    "ha": "ह",
+    # vowels
+    "a": "अ",
+    "aa": "आ",
+    "i": "इ",
+    "ii": "ई",
+    "u": "उ",
+    "uu": "ऊ",
+    "e": "ए",
+    "ai": "ऐ",
+    "o": "ओ",
+    "au": "औ",
 }
 
-# Build index_to_char according to folder order; fallback if missing
-index_to_char = []
-missing = []
-for name in folder_names:
-    if name in folder_to_char:
-        index_to_char.append(folder_to_char[name])
-    else:
-        missing.append(name)
-        # Fallback: use the folder name itself as placeholder (so training continues)
-        index_to_char.append(name)
+# -------------------------
+# Helpers
+# -------------------------
+def build_model(input_shape, num_classes):
+    """Simple but effective CNN for grayscale character classification."""
+    model = Sequential([
+        Conv2D(32, (3,3), activation='relu', input_shape=input_shape, padding='same'),
+        BatchNormalization(),
+        Conv2D(32, (3,3), activation='relu', padding='same'),
+        MaxPooling2D((2,2)),
+        Dropout(0.25),
 
-if missing:
-    print("\nWARNING: The following folders were NOT found in folder_to_char mapping:")
-    for m in missing:
-        print("  -", m)
-    print("These folder names will be used as-is in index_to_char.json as placeholders.")
-    print("If you want actual Marathi characters for these, add them to folder_to_char in train.py.\n")
+        Conv2D(64, (3,3), activation='relu', padding='same'),
+        BatchNormalization(),
+        Conv2D(64, (3,3), activation='relu', padding='same'),
+        MaxPooling2D((2,2)),
+        Dropout(0.25),
 
-num_classes = len(index_to_char)
-print("Final index -> character mapping (length {}):".format(num_classes))
-print(index_to_char)
+        Conv2D(128, (3,3), activation='relu', padding='same'),
+        BatchNormalization(),
+        MaxPooling2D((2,2)),
+        Dropout(0.3),
 
-# Save mapping (so GUI can load index_to_char.json)
-with open(models_dir / "index_to_char.json","w",encoding="utf-8") as f:
-    json.dump(index_to_char, f, ensure_ascii=False, indent=2)
+        Flatten(),
+        Dense(256, activation='relu'),
+        Dropout(0.5),
+        Dense(num_classes, activation='softmax')
+    ])
+
+    model.compile(optimizer='adam',
+                  loss='categorical_crossentropy',
+                  metrics=['accuracy'])
+    return model
+
+
+def create_index_to_char_map(class_indices):
+    """
+    Given Keras' class_indices (folder_name -> class_index),
+    return index_to_char mapping where index is stringified (so json safe)
+    and value is Marathi char (fallback to folder name).
+    """
+    # invert class_indices to index -> folder name
+    inv = {v: k for k, v in class_indices.items()}
+    index_to_char = {}
+    for idx_int, folder in inv.items():
+        # Use mapping if exists; otherwise fallback to folder string
+        char = folder_to_char.get(folder, folder)
+        index_to_char[str(idx_int)] = char
+    return index_to_char
+
 
 # -------------------------
-# Data augmentation + perf
+# Main training flow
 # -------------------------
-data_augmentation = tf.keras.Sequential([
-    layers.RandomRotation(0.1),
-    layers.RandomZoom(0.08),
-    layers.RandomTranslation(0.08, 0.08),
-])
+def main(args):
+    # Data generators
+    train_datagen = ImageDataGenerator(
+        rescale=1.0/255.0,
+        rotation_range=15,
+        width_shift_range=0.10,
+        height_shift_range=0.10,
+        shear_range=0.10,
+        zoom_range=0.10,
+        fill_mode='nearest'
+    )
+    val_datagen = ImageDataGenerator(rescale=1.0/255.0)
 
-train_ds = train_ds.map(lambda x, y: (data_augmentation(x, training=True), y))
-train_ds = train_ds.cache().shuffle(1000).prefetch(buffer_size=AUTOTUNE)
-val_ds = val_ds.cache().prefetch(buffer_size=AUTOTUNE)
+    # Flow from directories: assumed structure data/train/<class_name>/*.png
+    print("Loading training data from:", TRAIN_DIR)
+    train_generator = train_datagen.flow_from_directory(
+        str(TRAIN_DIR),
+        target_size=IMAGE_SIZE,
+        color_mode='grayscale',
+        batch_size=BATCH_SIZE,
+        class_mode='categorical',
+        shuffle=True
+    )
 
-# -------------------------
-# Improved CNN
-# -------------------------
-model = tf.keras.Sequential([
-    layers.Rescaling(1./255, input_shape=(IMAGE_SIZE[0], IMAGE_SIZE[1], 1)),
+    print("Loading validation data from:", VAL_DIR)
+    val_generator = val_datagen.flow_from_directory(
+        str(VAL_DIR),
+        target_size=IMAGE_SIZE,
+        color_mode='grayscale',
+        batch_size=BATCH_SIZE,
+        class_mode='categorical',
+        shuffle=False
+    )
 
-    layers.Conv2D(32, 3, activation='relu', padding='same'),
-    layers.BatchNormalization(),
-    layers.Conv2D(32, 3, activation='relu', padding='same'),
-    layers.MaxPooling2D(),
-    layers.Dropout(0.2),
+    num_classes = train_generator.num_classes
+    print(f"Number of classes detected: {num_classes}")
 
-    layers.Conv2D(64, 3, activation='relu', padding='same'),
-    layers.BatchNormalization(),
-    layers.Conv2D(64, 3, activation='relu', padding='same'),
-    layers.MaxPooling2D(),
-    layers.Dropout(0.3),
+    # Build model
+    input_shape = (IMAGE_SIZE[0], IMAGE_SIZE[1], 1)
+    model = build_model(input_shape, num_classes)
+    model.summary()
 
-    layers.Conv2D(128, 3, activation='relu', padding='same'),
-    layers.BatchNormalization(),
-    layers.MaxPooling2D(),
-    layers.Dropout(0.4),
+    # Callbacks
+    checkpoint_path = MODELS_DIR / "marathi_ocr_model.h5"
+    callbacks = [
+        EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True, verbose=1),
+        ModelCheckpoint(str(checkpoint_path), monitor='val_loss', save_best_only=True, verbose=1),
+        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, verbose=1)
+    ]
 
-    layers.Flatten(),
-    layers.Dense(256, activation='relu'),
-    layers.Dropout(0.5),
-    layers.Dense(num_classes, activation='softmax')
-])
+    # Fit
+    model.fit(
+        train_generator,
+        epochs=EPOCHS,
+        validation_data=val_generator,
+        callbacks=callbacks
+    )
 
-model.compile(
-    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
-    loss='sparse_categorical_crossentropy',
-    metrics=['accuracy']
-)
+    # After training, ensure best weights are saved (ModelCheckpoint did it)
+    # Create index_to_char mapping and save it
+    class_indices = train_generator.class_indices  # folder -> index
+    index_to_char = create_index_to_char_map(class_indices)
 
-model.summary()
+    mapping_path = MODELS_DIR / "index_to_char.json"
+    with open(mapping_path, "w", encoding="utf-8") as f:
+        # ensure_ascii=False keeps Marathi characters readable in JSON
+        json.dump(index_to_char, f, ensure_ascii=False, indent=2)
 
-# -------------------------
-# Callbacks & training
-# -------------------------
-callbacks = [
-    tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
-    tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, verbose=1)
-]
+    print(f"Saved model to: {checkpoint_path}")
+    print(f"Saved index_to_char mapping to: {mapping_path}")
 
-history = model.fit(
-    train_ds,
-    validation_data=val_ds,
-    epochs=50,
-    callbacks=callbacks
-)
 
-# -------------------------
-# Save model
-# -------------------------
-model.save(models_dir / "marathi_ocr_model.h5")
-print("✅ Training complete. Saved model and mapping to:", models_dir)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train Marathi OCR model")
+    parser.add_argument("--epochs", type=int, default=EPOCHS, help="Number of epochs")
+    args = parser.parse_args()
+    EPOCHS = args.epochs
+    main(args)
