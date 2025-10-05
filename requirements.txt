@@ -1,0 +1,15 @@
+# Core ML + OCR
+tensorflow==2.20.0
+numpy==1.26.4
+scikit-learn==1.5.1
+
+# Image Processing
+pillow==10.4.0
+opencv-python==4.10.0.84
+matplotlib==3.9.2
+
+# GUI (Tkinter ships with Python, optional PyPI fallback)
+tk==0.1.0
+
+# Utilities
+tqdm==4.66.5
