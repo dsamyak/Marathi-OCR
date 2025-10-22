@@ -1,6 +1,7 @@
 # Python virtual environments
 venv/
 tfenv/
+tf_amd/
 
 # Cache and compiled files
 __pycache__/
