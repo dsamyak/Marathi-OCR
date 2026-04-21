@@ -2,7 +2,7 @@
 venv/
 tfenv/
 tf_amd/
-
+node_modules
 # Cache and compiled files
 __pycache__/
 *.pyc
